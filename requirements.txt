@@ -1,0 +1,13 @@
+# --- App framework & charting ---
+streamlit==1.60.0
+plotly==6.9.0
+
+# --- LLM ---
+anthropic==0.120.2
+
+# --- Data / DB ---
+pandas==3.0.5
+# sqlite3 is in the Python standard library — no pip install needed
+
+# --- Environment / secrets ---
+python-dotenv==1.2.2
