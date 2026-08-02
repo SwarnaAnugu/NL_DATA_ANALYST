@@ -1,0 +1,28 @@
+# --- Secrets ---
+.env
+*.env
+!.env.example
+
+# --- Data (real data stays out of git) ---
+data/*
+!data/.gitkeep
+
+# --- Python ---
+__pycache__/
+*.pyc
+
+# --- Virtual environment ---
+venv/
+.venv/
+
+# --- Streamlit secrets (alt convention, belt-and-suspenders) ---
+.streamlit/secrets.toml
+
+# --- SQLite database files ---
+*.db
+*.sqlite
+*.sqlite3
+
+# --- OS / editor cruft ---
+.DS_Store
+.idea/
