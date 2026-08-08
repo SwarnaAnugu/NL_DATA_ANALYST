@@ -1,3 +1,4 @@
+import json
 import os
 from dotenv import load_dotenv
 import anthropic
@@ -14,6 +15,22 @@ Rules:
 - Prefer explicit JOINs with clear ON conditions over implicit joins.
 - Return ONLY the raw SQL query. No explanation, no markdown code fences, no commentary.
 """
+
+SQL_CRITIQUE_SYSTEM_PROMPT = """You are reviewing a SQL query for correctness before it runs against a real database.
+
+Check for these specific problems:
+- Does the query actually answer the question asked, or does it answer something subtly different?
+- Are JOINs correct? Could any JOIN cause duplicate rows to be double-counted in a SUM or COUNT?
+- Are column names used correctly according to the schema?
+- Are there any non-SELECT statements (there should never be any)?
+
+Respond with ONLY valid JSON, no other text, in this exact shape:
+{"is_valid": true or false, "issue": "string or null", "corrected_sql": "string or null"}
+
+If is_valid is true, issue and corrected_sql should both be null.
+If is_valid is false, describe the issue and provide a corrected_sql that fixes it.
+"""
+
 
 def generate_sql(question: str, schema_context: str) -> str:
     response = client.messages.create(
@@ -34,12 +51,44 @@ def generate_sql(question: str, schema_context: str) -> str:
         raw_text = raw_text.strip()
 
     return raw_text
+def critique_sql(question: str, schema_context: str, sql: str) -> dict:
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=600,
+        system=SQL_CRITIQUE_SYSTEM_PROMPT,
+        messages=[{
+            "role": "user",
+            "content": f"Schema:\n{schema_context}\n\nQuestion: {question}\n\nSQL to review:\n{sql}"
+        }]
+    )
+
+    raw_text = response.content[0].text.strip()
+
+    if raw_text.startswith("```"):
+        raw_text = raw_text.split("\n", 1)[1]
+        raw_text = raw_text.rsplit("\n", 1)[0]
+        raw_text = raw_text.strip()
+
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        return {
+            "is_valid": False,
+            "issue": "Failed to parse critique response as JSON — treating as invalid to be safe.",
+            "corrected_sql": None,
+            "raw_response": raw_text
+        }
 
 if __name__ == "__main__":
     from schema_context import build_schema_context
 
     schema = build_schema_context()
-    question = "How many orders were placed by customers in Sao Paulo state?"
+    question = "How many orders were placed in total?"
+    buggy_sql = """
+    SELECT COUNT(o.order_id)
+    FROM orders o
+    JOIN order_items oi ON o.order_id = oi.order_id
+    """
 
-    sql = generate_sql(question, schema)
-    print(sql)
+    result = critique_sql(question, schema, buggy_sql)
+    print(result)
