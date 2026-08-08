@@ -91,3 +91,8 @@ def _run(question: str, sql: str, attempts: int) -> dict:
 if __name__ == "__main__":
     result = answer_question("What is the total revenue from all orders?")
     print(result)
+
+    print()
+
+    result2 = answer_question("What is the total revenue by customer state?")
+    print(result2)
