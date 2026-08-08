@@ -4,19 +4,28 @@ from sql_generation.schema_context import build_schema_context
 from db.execute_query import execute_query
 from charting.chart_selector import select_chart
 from answering.explain_result import explain_result
+from sql_generation.scope_check import check_scope
 
 
 def answer_question(user_question: str) -> dict:
     """
     Orchestrates the full pipeline:
-    ambiguity check -> generate -> critique -> (at most 1 retry) -> execute -> explain.
+    scope check -> ambiguity check -> generate -> critique -> (at most 1 retry) -> execute -> explain.
 
     Returns a dict, always one of:
+      {"status": "out_of_scope", "reason": "..."}
       {"status": "clarify", "question": "..."}
       {"status": "success", "sql": "...", "attempts": 1 or 2, "columns": [...], "rows": [...], "explanation": "...", "chart": {...}}
       {"status": "failed", "reason": "..."}
     """
     schema = build_schema_context()
+
+    scope_result = check_scope(user_question)
+    if not scope_result.get("is_in_scope"):
+        return {
+            "status": "out_of_scope",
+            "reason": "I can only answer questions about this e-commerce dataset — try asking about revenue, orders, customers, products, or reviews."
+        }
 
     ambiguity_result = check_ambiguity(user_question, schema)
     if ambiguity_result.get("is_ambiguous"):
@@ -39,7 +48,7 @@ def answer_question(user_question: str) -> dict:
             return _run(user_question, corrected_sql, attempts=2)
         return {
             "status": "failed",
-            "reason": f"Corrected SQL also failed critique: {retry_critique.get('issue')}"
+            "reason": "I wasn't able to turn this into a specific data query. Try rephrasing it as a more direct question — for example, 'how many orders are in the dataset?' instead of a broader or more open-ended question."
         }
 
     else:
@@ -56,7 +65,7 @@ def answer_question(user_question: str) -> dict:
             return _run(user_question, retry_sql, attempts=2)
         return {
             "status": "failed",
-            "reason": f"Retry generation also failed critique: {retry_critique.get('issue')}"
+            "reason": "I wasn't able to turn this into a specific data query. Try rephrasing it as a more direct question — for example, 'how many orders are in the dataset?' instead of a broader or more open-ended question."
         }
 
 
@@ -94,5 +103,5 @@ if __name__ == "__main__":
 
     print()
 
-    result2 = answer_question("What is the total revenue by customer state?")
+    result2 = answer_question("What's the weather like today?")
     print(result2)
