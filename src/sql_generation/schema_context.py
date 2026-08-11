@@ -1,10 +1,14 @@
 import os
+from pathlib import Path
 import sqlite3
 from dotenv import load_dotenv
 
 load_dotenv()
 
-DB_PATH = os.environ["DATABASE_PATH"]
+# Resolve relative to the repo root, not the current working directory,
+# so this works no matter which folder you run the script from.
+REPO_ROOT = Path(__file__).resolve().parents[2]  # src/sql_generation -> src -> repo root
+DB_PATH = REPO_ROOT / os.environ["DATABASE_PATH"]
 def get_table_names(conn):
     """Return all real table names, skipping SQLite's internal ones."""
     cur = conn.cursor()
