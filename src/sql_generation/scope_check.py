@@ -1,10 +1,5 @@
 import json
-import os
-from dotenv import load_dotenv
-import anthropic
-
-load_dotenv()
-client = anthropic.Anthropic()
+from config import get_client, FAST_MODEL
 
 SCOPE_CHECK_SYSTEM_PROMPT = """You are a gatekeeper for a tool that answers questions about a specific
 Brazilian e-commerce dataset (orders, customers, products, sellers, payments, reviews).
@@ -25,8 +20,8 @@ Respond ONLY with JSON in this exact format, nothing else:
 
 
 def check_scope(question: str) -> dict:
-    response = client.messages.create(
-        model="claude-haiku-4-5",
+    response = get_client().messages.create(
+        model=FAST_MODEL,
         max_tokens=200,
         system=SCOPE_CHECK_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": question}]

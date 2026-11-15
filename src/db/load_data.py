@@ -18,6 +18,18 @@ FILES_TO_TABLES = [
     ("olist_geolocation_dataset.csv", "geolocation"),
 ]
 
+def collapse_geolocation(df: pd.DataFrame) -> pd.DataFrame:
+    """The raw file has ~1M rows (many GPS points per zip prefix) and dominates
+    the database size. Nothing in this project needs individual points, so keep
+    one row per zip prefix: mean coordinates, most common city and state."""
+    mode = lambda s: s.mode().iat[0]  # noqa: E731
+    return (df.groupby("geolocation_zip_code_prefix", as_index=False)
+              .agg(geolocation_lat=("geolocation_lat", "mean"),
+                   geolocation_lng=("geolocation_lng", "mean"),
+                   geolocation_city=("geolocation_city", mode),
+                   geolocation_state=("geolocation_state", mode)))
+
+
 def load_all():
     if DB_PATH.exists():
         DB_PATH.unlink()
@@ -31,9 +43,12 @@ def load_all():
 
     for csv_name, table_name in FILES_TO_TABLES:
         df = pd.read_csv(DATA_DIR / csv_name)
+        if table_name == "geolocation":
+            df = collapse_geolocation(df)
         df.to_sql(table_name, conn, if_exists="append", index=False)
         print(f"Loaded {len(df):>8} rows into {table_name}")
 
+    conn.execute("VACUUM")
     conn.close()
 
 if __name__ == "__main__":

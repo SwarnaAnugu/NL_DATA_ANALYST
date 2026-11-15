@@ -1,77 +1,69 @@
+import re
+
+MAX_SERIES = 12          # more groups than this make an unreadable legend
+MAX_MEASURES = 5         # more numeric columns than this: show the table instead
+
+
 def select_chart(columns: list, rows: list) -> dict:
     """
-    Deterministic, heuristic-based chart type selection.
-    No LLM calls — pure logic based on the shape of the result set.
+    Deterministic, heuristic chart choice. No LLM calls: the result's shape decides.
 
     Returns a dict, always one of:
       {"chart_type": "none", "reason": "..."}
-      {"chart_type": "bar", "x": column_name, "y": column_name}
-      {"chart_type": "line", "x": column_name, "y": column_name}
+      {"chart_type": "bar" | "line", "x": col, "y": col}                   one measure
+      {"chart_type": "bar" | "line", "x": col, "y": [col, ...]}            several measures
+      {"chart_type": "bar" | "line", "x": col, "y": col, "color": col}     one measure per group
+
+    "line" is used when the x column looks like a date/month, else "bar".
     """
-    num_rows = len(rows)
-    num_cols = len(columns)
-
-    # Rule 1: a single value (e.g. total revenue, a count) needs no chart.
-    if num_rows == 1 and num_cols == 1:
+    if not rows or not columns:
+        return {"chart_type": "none", "reason": "No rows."}
+    if len(rows) == 1 and len(columns) == 1:
         return {"chart_type": "none", "reason": "Single value result — no chart needed."}
+    if len(rows) == 1:
+        return {"chart_type": "none", "reason": "A single row reads better as text than as a chart."}
 
-    # Only handle the clean 2-column case for now. Anything else is
-    # ambiguous enough that we'd rather show a table than guess wrong.
-    if num_cols != 2:
-        return {"chart_type": "none", "reason": "Chart selection only supports 2-column results currently."}
+    kinds = [_column_kind(rows, i) for i in range(len(columns))]
+    numeric = [c for c, k in zip(columns, kinds) if k == "number"]
+    labels = [c for c, k in zip(columns, kinds) if k in ("text", "date")]
+    date_cols = [c for c, k in zip(columns, kinds) if k == "date"]
 
-    col_a, col_b = columns[0], columns[1]
-    sample_row = rows[0]
-    val_a, val_b = sample_row[0], sample_row[1]
+    # One label, one measure (the classic case).
+    if len(labels) == 1 and len(numeric) == 1:
+        x = labels[0]
+        return {"chart_type": "line" if x in date_cols else "bar", "x": x, "y": numeric[0]}
 
-    # Figure out which of the two columns is numeric and which is the
-    # "label" column (text, or something that looks like a date string).
-    a_is_numeric = isinstance(val_a, (int, float))
-    b_is_numeric = isinstance(val_b, (int, float))
+    # One label, several measures (e.g. month, orders, revenue): compare on one axis.
+    if len(labels) == 1 and 2 <= len(numeric) <= MAX_MEASURES:
+        x = labels[0]
+        return {"chart_type": "line" if x in date_cols else "bar", "x": x, "y": numeric}
 
-    if a_is_numeric and not b_is_numeric:
-        numeric_col, label_col = col_a, col_b
-        label_val = val_b
-    elif b_is_numeric and not a_is_numeric:
-        numeric_col, label_col = col_b, col_a
-        label_val = val_a
-    else:
-        # Both numeric, or both non-numeric — too ambiguous to auto-pick axes.
-        return {"chart_type": "none", "reason": "Could not confidently identify a numeric column and a label column."}
+    # Two labels, one measure (e.g. month x state -> revenue): one series per group.
+    if len(labels) == 2 and len(numeric) == 1:
+        x = date_cols[0] if date_cols else labels[0]
+        color = labels[1] if labels[0] == x else labels[0]
+        n_groups = len({r[columns.index(color)] for r in rows})
+        if n_groups > MAX_SERIES:
+            return {"chart_type": "none", "reason": f"{n_groups} groups is too many to chart; see the table."}
+        return {"chart_type": "line" if x in date_cols else "bar", "x": x, "y": numeric[0], "color": color}
 
-    # Rule 2: does the label column look like a date/time?
-    if _looks_like_date(str(label_val)):
-        return {"chart_type": "line", "x": label_col, "y": numeric_col}
+    return {"chart_type": "none", "reason": "This result shape is better read as a table."}
 
-    # Rule 3: otherwise, treat it as a category -> bar chart.
-    return {"chart_type": "bar", "x": label_col, "y": numeric_col}
+
+def _column_kind(rows: list, index: int) -> str:
+    """'number', 'date' (text that looks like YYYY-MM[-DD]) or 'text', judged on the first non-null value."""
+    for row in rows:
+        value = row[index]
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            return "text"
+        if isinstance(value, (int, float)):
+            return "number"
+        return "date" if _looks_like_date(str(value)) else "text"
+    return "text"
 
 
 def _looks_like_date(value: str) -> bool:
-    """Very lightweight date-shape check: looks for YYYY-MM or YYYY-MM-DD
-    style strings without needing to actually parse them."""
-    import re
+    """Lightweight check for YYYY-MM or YYYY-MM-DD style strings."""
     return bool(re.match(r"^\d{4}-\d{2}(-\d{2})?", value))
-
-
-if __name__ == "__main__":
-    # Test 1: single value, no chart
-    print(select_chart(["total_revenue"], [(16008872.12,)]))
-
-    # Test 2: category + number, should pick bar
-    print(select_chart(
-        ["product_category", "total_sales"],
-        [("electronics", 5000), ("furniture", 3200)]
-    ))
-
-    # Test 3: date + number, should pick line
-    print(select_chart(
-        ["order_month", "total_sales"],
-        [("2018-01", 12000), ("2018-02", 15000)]
-    ))
-
-    # Test 4: two numeric columns, ambiguous, should decline
-    print(select_chart(
-        ["order_count", "total_sales"],
-        [(120, 5000), (95, 3200)]
-    ))

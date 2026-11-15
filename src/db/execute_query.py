@@ -1,70 +1,68 @@
 import sqlite3
-from pathlib import Path
+import time
 
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "nl_data_analyst.db"
-
-# Belt-and-suspenders check #1: reject obviously non-SELECT statements
-# before we even touch the database.
-def _looks_like_select(sql: str) -> bool:
-    cleaned = sql.strip().lstrip("(").strip()
-    return cleaned.upper().startswith("SELECT")
+from config import DB_PATH, MAX_ROWS, QUERY_TIMEOUT_S
+from safety.sql_validator import validate_sql
 
 
 def execute_query(sql: str) -> dict:
     """
-    Executes a validated SQL query against the database in read-only mode.
+    Executes a SQL query against the database with three layers of protection:
+      1. Static validation (single SELECT/WITH statement, no forbidden keywords)
+      2. A read-only SQLite connection (the database itself refuses writes)
+      3. A wall-clock timeout and a row cap, so one bad query can't hang the app
 
     Returns a dict, always one of:
-      {"status": "success", "columns": [...], "rows": [...]}
-      {"status": "rejected", "reason": "..."}   # failed the pre-check
-      {"status": "error", "reason": "..."}      # DB itself raised an error
+      {"status": "success", "columns": [...], "rows": [...], "truncated": bool}
+      {"status": "rejected", "reason": "..."}   # failed static validation
+      {"status": "error", "reason": "..."}      # the database raised an error
     """
-    if not _looks_like_select(sql):
-        return {
-            "status": "rejected",
-            "reason": "Only SELECT statements are permitted."
-        }
+    ok, reason = validate_sql(sql)
+    if not ok:
+        return {"status": "rejected", "reason": reason}
 
-    # Belt-and-suspenders check #2: the real enforcement layer.
-    # Opening the connection in SQLite's read-only URI mode means the
-    # database itself will refuse any write, no matter how the SQL is worded.
+    conn = None
     try:
         conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        conn.execute("PRAGMA query_only = ON")
+
+        # Hard limits enforced by SQLite itself, as a backstop to the static
+        # validator: no string/blob over 10 MB, no SQL text over 20k chars,
+        # no extension loading.
+        conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 10_000_000)
+        conn.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 20_000)
+        conn.enable_load_extension(False) if hasattr(conn, "enable_load_extension") else None
+
+        # SQLite calls this handler every N VM instructions; returning a
+        # truthy value aborts the query.
+        deadline = time.monotonic() + QUERY_TIMEOUT_S
+        conn.set_progress_handler(lambda: time.monotonic() > deadline, 100_000)
+
         cur = conn.cursor()
         cur.execute(sql)
-        rows = cur.fetchall()
-        columns = [description[0] for description in cur.description]
-        conn.close()
-        return {"status": "success", "columns": columns, "rows": rows}
-
+        columns = [d[0] for d in cur.description]
+        rows = cur.fetchmany(MAX_ROWS + 1)
+        truncated = len(rows) > MAX_ROWS
+        return {
+            "status": "success",
+            "columns": columns,
+            "rows": rows[:MAX_ROWS],
+            "truncated": truncated,
+        }
+    except sqlite3.OperationalError as e:
+        if "interrupted" in str(e).lower():
+            return {"status": "error", "reason": f"Query exceeded the {QUERY_TIMEOUT_S}s time limit."}
+        return {"status": "error", "reason": str(e)}
     except sqlite3.Error as e:
         return {"status": "error", "reason": str(e)}
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 if __name__ == "__main__":
-    # Sanity test 1: a valid read query
-    result = execute_query("SELECT COUNT(*) FROM orders")
-    print("Valid query result:", result)
-
-    # Sanity test 2: an attempted write, should be rejected before hitting the DB
-    result = execute_query("DELETE FROM orders")
-    print("Write attempt result:", result)
-
-    # Sanity test 3: a write that dodges the naive string check by wrapping in parens
-    # This should still be blocked — but by the DB connection, not the string check.
-    result = execute_query("(DELETE FROM orders)".replace("(", "", 1))
-    print("Malformed SQL result:", result)
-    # Sanity test 4: bypass the string check entirely, prove the DB
-    # connection itself refuses to write, no matter what.
-    try:
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM orders")
-        conn.close()
-        print("Direct write attempt: THIS SHOULD NOT PRINT")
-    except sqlite3.Error as e:
-        print("Direct write attempt correctly blocked by read-only connection:", e)
-        # Sanity test 5: syntactically a SELECT, but semantically broken —
-        # references a column that doesn't exist.
-        result = execute_query("SELECT nonexistent_column FROM orders")
-        print("Bad column result:", result)
+    print("valid   :", execute_query("SELECT COUNT(*) FROM orders"))
+    print("write   :", execute_query("DELETE FROM orders"))
+    print("multi   :", execute_query("SELECT 1; DROP TABLE orders"))
+    print("pragma  :", execute_query("PRAGMA table_info(orders)"))
+    print("bad col :", execute_query("SELECT nonexistent_column FROM orders"))
